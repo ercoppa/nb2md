@@ -320,6 +320,9 @@ class NotebookConverter:
         current_slide = []
         
         for cell in self.cells:
+            # Skip hidden cells (omit from markdown entirely)
+            if 'hide' in self._get_cell_tags(cell):
+                continue
             # Skip empty cells
             source = cell.get('source', [])
             if not source or (isinstance(source, list) and not ''.join(source).strip()):
@@ -570,6 +573,51 @@ class NotebookConverter:
             return f"{start}{body}{end}"
 
         return alert_div_pattern.sub(_sub_alert, html)
+
+    def _get_br_count(self, tags: List[str]) -> int:
+        """Return the number of <br/> to append based on tags.
+
+        Supported tags:
+        - br (equivalent to br-1)
+        - br-N where N is a positive integer
+
+        If multiple br/br-N tags are present, the maximum N wins.
+        """
+        br_count = 0
+        for tag in tags:
+            if tag == 'br':
+                br_count = max(br_count, 1)
+                continue
+            if tag.startswith('br-'):
+                try:
+                    n = int(tag.split('-', 1)[1])
+                except ValueError:
+                    continue
+                if n > 0:
+                    br_count = max(br_count, n)
+        return br_count
+
+    def _get_padding_style(self, tags: List[str]) -> Optional[str]:
+        """Return an inline style string for padding tags.
+
+        Supported tags:
+        - padding (adds 10px on all sides)
+        - padding-top (adds 10px on top)
+        - padding-bottom (adds 10px on bottom)
+        """
+        if 'padding' in tags:
+            return 'padding: 10px;'
+
+        styles: List[str] = []
+        if 'padding-top' in tags:
+            styles.append('padding-top: 10px;')
+        if 'padding-bottom' in tags:
+            styles.append('padding-bottom: 10px;')
+
+        if not styles:
+            return None
+
+        return ' '.join(styles)
     
     def _format_cell_content(self, cell: Dict[str, Any]) -> str:
         """
@@ -619,6 +667,9 @@ class NotebookConverter:
         
         # Check if content should be centered
         should_center = 'center' in tags
+
+        padding_style = self._get_padding_style(tags)
+        br_count = self._get_br_count(tags)
         
         if cell_type == 'markdown':
             content = cell_content.strip()
@@ -627,7 +678,12 @@ class NotebookConverter:
             if title_id:
                 # Strip any h1–h6 markdown or HTML markup from the content
                 content_no_headings = self._strip_heading_markup(content).strip()
-                return f'<div id="{title_id}">{content_no_headings}</div>'
+                content = f'<div id="{title_id}">{content_no_headings}</div>'
+                if padding_style:
+                    content = f'<div style="{padding_style}">\n\n{content}\n\n</div>'
+                if br_count:
+                    content += "\n" + ("<br/>\n" * br_count)
+                return content
 
             # Wrap in alert box if needed
             if alert_type:
@@ -638,6 +694,11 @@ class NotebookConverter:
                 content = f'<div class="alert {alert_class}">{content}</div>'
             elif should_center:
                 content = f'<div class="cell-center">\n\n{content}\n\n</div>'
+
+            if padding_style:
+                content = f'<div style="{padding_style}">\n\n{content}\n\n</div>'
+            if br_count:
+                content += "\n" + ("<br/>\n" * br_count)
             
             return content
         elif cell_type == 'code':
@@ -657,6 +718,11 @@ class NotebookConverter:
                 code_block = f'<div class="alert {alert_class}">\n\n{code_block}\n\n</div>'
             elif should_center:
                 code_block = f'<div class="cell-center">\n\n{code_block}\n\n</div>'
+
+            if padding_style:
+                code_block = f'<div style="{padding_style}">\n\n{code_block}\n\n</div>'
+            if br_count:
+                code_block += "\n" + ("<br/>\n" * br_count)
             
             return code_block
         

@@ -231,6 +231,32 @@ Use the `center` tag to horizontally center content within a cell:
    </div>
    ```
 
+## Spacing (Line Breaks & Padding)
+
+You can add simple spacing effects to a cell using tags.
+
+### Line breaks (`br`, `br-N`)
+
+- Tag a cell with `br` to append one `<br/>` after the cell content.
+- Tag a cell with `br-2`, `br-3`, ... to append multiple breaks.
+
+Example:
+```
+Cell with tag "br-2": This paragraph will be followed by two line breaks
+```
+
+### Padding (`padding`, `padding-top`, `padding-bottom`)
+
+- `padding`: wraps the cell content in a `<div style="padding: 10px;"> ... </div>`
+- `padding-top`: adds only `padding-top: 10px;`
+- `padding-bottom`: adds only `padding-bottom: 10px;`
+
+You can combine `padding-top` and `padding-bottom` on the same cell.
+
+## Hiding Cells
+
+Tag a cell with `hide` to omit it from the generated markdown entirely.
+
 ## Auto-Animate Transitions
 
 Use the `auto-animate` tag to enable Reveal.js auto-animate transitions between consecutive slides:
