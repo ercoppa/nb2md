@@ -552,6 +552,31 @@ class NotebookConverter:
         """
         return "*" * (index + 1)
 
+    def _render_inline_markdown_for_raw_html(self, text: str) -> str:
+        parts: List[str] = []
+        code_spans: List[str] = []
+
+        i = 0
+        while i < len(text):
+            if text[i] == '`':
+                j = text.find('`', i + 1)
+                if j != -1:
+                    code_spans.append(text[i + 1 : j])
+                    parts.append(f"\x00CODE{len(code_spans) - 1}\x00")
+                    i = j + 1
+                    continue
+            parts.append(text[i])
+            i += 1
+
+        rendered = ''.join(parts)
+        rendered = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", rendered, flags=re.DOTALL)
+        rendered = re.sub(r"__(.+?)__", r"<b>\1</b>", rendered, flags=re.DOTALL)
+
+        for idx, code in enumerate(code_spans):
+            rendered = rendered.replace(f"\x00CODE{idx}\x00", f"<code>{code}</code>")
+
+        return rendered
+
     def _replace_inline_code_in_alerts(self, html: str) -> str:
         """Convert inline backtick code inside alert divs to <code> spans.
 
@@ -570,6 +595,8 @@ class NotebookConverter:
         def _sub_alert(match: re.Match) -> str:
             start, body, end = match.group(1), match.group(2), match.group(3)
             body = inline_code_pattern.sub(r"<code>\1</code>", body)
+            body = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", body, flags=re.DOTALL)
+            body = re.sub(r"__(.+?)__", r"<b>\1</b>", body, flags=re.DOTALL)
             return f"{start}{body}{end}"
 
         return alert_div_pattern.sub(_sub_alert, html)
@@ -687,10 +714,7 @@ class NotebookConverter:
 
             # Wrap in alert box if needed
             if alert_type:
-                # For alert boxes we must ensure inline backticks become <code>
-                # because markdown is not processed inside raw HTML blocks.
-                inline_code_pattern = re.compile(r"`([^`]+)`")
-                content = inline_code_pattern.sub(r"<code>\1</code>", content)
+                content = self._render_inline_markdown_for_raw_html(content)
                 content = f'<div class="alert {alert_class}">{content}</div>'
             elif should_center:
                 content = f'<div class="cell-center">\n\n{content}\n\n</div>'
