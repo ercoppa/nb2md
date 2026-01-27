@@ -31,12 +31,12 @@ def preprocess_file(file_path: Path) -> Optional[Path]:
     
     # Convert notebook to markdown
     output_path = file_path.with_suffix('.md')
-    
+
     # Check if markdown exists and is newer than notebook
     if output_path.exists():
         notebook_mtime = file_path.stat().st_mtime
         markdown_mtime = output_path.stat().st_mtime
-        
+
         # If markdown is newer or same age, skip conversion
         if markdown_mtime >= notebook_mtime:
             return None

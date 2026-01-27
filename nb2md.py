@@ -417,6 +417,213 @@ class NotebookConverter:
             columns.append(current_column)
         
         return pre_column_cells, columns, post_column_cells, alignment
+
+    def _has_table_row_tags(self, cells: List[Dict[str, Any]]) -> bool:
+        """Check if any cells have table-row tags."""
+        for cell in cells:
+            tags = self._get_cell_tags(cell)
+            if 'table-row' in tags:
+                return True
+        return False
+
+    def _render_table_columns(self, columns: List[List[Dict[str, Any]]], alignment: str) -> str:
+        """Render columns as an HTML table for row-aligned content.
+        
+        Each cell's content is split into individual lines/items that become separate table rows.
+        
+        Args:
+            columns: List of columns, where each column is a list of cells
+            alignment: 'top' or 'center' for vertical alignment
+            
+        Returns:
+            HTML table string
+        """
+        if not columns:
+            return ""
+        
+        # Extract and split content from each column into row items
+        # Also collect any br tags from cells (take the maximum)
+        column_rows = []
+        max_br_count = 0
+        
+        for col_cells in columns:
+            col_items = []
+            for cell in col_cells:
+                # Check for br tags before formatting
+                tags = self._get_cell_tags(cell)
+                br_count = self._get_br_count(tags)
+                max_br_count = max(max_br_count, br_count)
+                
+                # Get raw content and format it manually for table cells
+                # Don't use _format_cell_content as it adds br tags inline
+                cell_type = cell.get('cell_type', '')
+                if cell_type == 'markdown':
+                    cell_content = self._get_cell_content(cell)
+                    
+                    # Normalize <br> tags to <br/> before processing
+                    cell_content = re.sub(r'<br\s*/?\s*>', '<br/>', cell_content)
+                    
+                    content = self._separate_display_math(cell_content.strip())
+                    content = self._escape_math_for_reveal_markdown(content)
+                else:
+                    content = ""
+                
+                if content:
+                    # Split by empty lines (double newlines) to get separate rows
+                    # This allows users to control row boundaries with blank lines
+                    row_blocks = re.split(r'\n\s*\n', content.strip())
+                    
+                    for block in row_blocks:
+                        block = block.strip()
+                        if not block or block in ['<br/>', '<br>', '<br />']:
+                            continue
+                        
+                        # Each block is a separate row
+                        # Convert single newlines within the block to <br/> tags
+                        # This preserves line breaks within the same row
+                        # But don't double-convert if <br/> already exists
+                        block = block.replace('\n', '<br/>')
+                        
+                        # Check if block starts with a list marker
+                        has_list_marker = re.match(r'^[-*+]\s+', block) or re.match(r'^\d+\.\s+', block)
+                        if has_list_marker:
+                            # Remove markdown marker and wrap in bullet span
+                            block = re.sub(r'^[-*+]\s+', '', block)
+                            block = re.sub(r'^\d+\.\s+', '', block)
+                            col_items.append(f'<span class="bullet">•</span> {block}')
+                        else:
+                            # No list marker, use plain text
+                            col_items.append(block)
+            column_rows.append(col_items)
+        
+        if not column_rows:
+            return ""
+        
+        # Find maximum number of rows across all columns
+        max_rows = max(len(items) for items in column_rows) if column_rows else 0
+        
+        # Build table structure
+        align_class = "table-columns-top" if alignment == 'top' else "table-columns-center"
+        table_parts = []
+        table_parts.append(f'<table class="table-columns {align_class}">')
+        table_parts.append('<tbody>')
+        
+        # Iterate through rows
+        for row_idx in range(max_rows):
+            table_parts.append('<tr>')
+            
+            # Iterate through columns
+            for col_items in column_rows:
+                if row_idx < len(col_items):
+                    table_parts.append(f'<td>{col_items[row_idx]}</td>')
+                else:
+                    # Empty cell if this column doesn't have enough rows
+                    table_parts.append('<td></td>')
+            
+            table_parts.append('</tr>')
+        
+        table_parts.append('</tbody>')
+        table_parts.append('</table>')
+        
+        # Add any br tags after the table
+        br_html = ""
+        if max_br_count > 0:
+            br_html = "\n\n" + ("<br/>\n" * max_br_count)
+        
+        return '\n'.join(table_parts) + br_html
+
+    def _split_cells_into_column_blocks(self, cells: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Split slide cells into alternating normal-cell and columns-block segments.
+
+        This enables multiple rows of columns on the same slide.
+
+        Rules:
+        - 'col'/'column' and 'top-col'/'top-column' start a column block (or a new column within it)
+        - 'end-column' terminates the current columns block (row terminator)
+        - 'no-column' terminates the current columns block too (kept for backwards compatibility)
+        - 'table-row' marks cells that should align as rows across columns
+
+        Returns:
+            List of segments. Each segment is either:
+            - {'type': 'cells', 'cells': [...]}
+            - {'type': 'columns', 'columns': [[...], ...], 'alignment': 'top'|'center', 'use_table': bool}
+        """
+        segments: List[Dict[str, Any]] = []
+
+        buffer_cells: List[Dict[str, Any]] = []
+        columns: List[List[Dict[str, Any]]] = []
+        current_column: List[Dict[str, Any]] = []
+        in_columns = False
+        alignment = 'center'
+
+        def _flush_cells() -> None:
+            nonlocal buffer_cells, segments
+            if buffer_cells:
+                segments.append({'type': 'cells', 'cells': buffer_cells})
+                buffer_cells = []
+
+        def _flush_columns() -> None:
+            nonlocal columns, current_column, in_columns, alignment, segments
+            if current_column:
+                columns.append(current_column)
+                current_column = []
+            if columns:
+                # Check if any cell in the columns has table-row tag
+                use_table = False
+                for col_cells in columns:
+                    if self._has_table_row_tags(col_cells):
+                        use_table = True
+                        break
+                segments.append({
+                    'type': 'columns',
+                    'columns': columns,
+                    'alignment': alignment,
+                    'use_table': use_table
+                })
+            columns = []
+            current_column = []
+            in_columns = False
+            alignment = 'center'
+
+        for cell in cells:
+            tags = self._get_cell_tags(cell)
+
+            if 'end-column' in tags or 'no-column' in tags:
+                if in_columns:
+                    _flush_columns()
+
+                # Keep the marker cell itself if it has content
+                cell_content = self._get_cell_content(cell).strip()
+                if cell_content:
+                    buffer_cells.append(cell)
+                continue
+
+            if 'top-col' in tags or 'top-column' in tags or 'col' in tags or 'column' in tags:
+                # Starting a new column (and possibly a new columns block)
+                if not in_columns:
+                    _flush_cells()
+                    in_columns = True
+
+                if 'top-col' in tags or 'top-column' in tags:
+                    alignment = 'top'
+
+                if current_column:
+                    columns.append(current_column)
+
+                cell_content = self._get_cell_content(cell).strip()
+                current_column = [cell] if cell_content else []
+                continue
+
+            if in_columns:
+                current_column.append(cell)
+            else:
+                buffer_cells.append(cell)
+
+        if in_columns:
+            _flush_columns()
+        _flush_cells()
+
+        return segments
     
     def _get_fragment_index(self, cell: Dict[str, Any]) -> Optional[int]:
         """
@@ -438,7 +645,7 @@ class NotebookConverter:
                     pass
         return None
     
-    def _group_cells_into_fragments(self, cells: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _group_cells_into_fragments_with_state(self, cells: List[Dict[str, Any]], in_fragment_mode: bool = False, current_fragment_step: Optional[int] = None, next_auto_fragment_step: int = 0) -> Tuple[List[Dict[str, Any]], bool, Optional[int], int]:
         """
         Group cells into fragments based on 'fragment' tag or slideshow metadata.
         
@@ -446,76 +653,72 @@ class NotebookConverter:
             cells: List of cells to group
             
         Returns:
-            List of fragment dictionaries with 'cells', 'index', and 'has_index' keys
+            Tuple of:
+            - list of fragment dictionaries with 'cells', 'index', 'has_index', and 'force_fragment'
+            - updated in_fragment_mode flag
+            - current_fragment_step (fragment index to use for the current fragment region, if any)
+            - next_auto_fragment_step (next available auto-assigned fragment index)
         """
         fragments = []
-        current_fragment = []
-        current_fragment_index = None
-        in_fragment = False
         
         for cell in cells:
             tags = self._get_cell_tags(cell)
             is_no_fragment = 'no-fragment' in tags
-            is_fragment_marker = 'fragment' in tags or self._is_slideshow_fragment(cell)
+            is_fragment_mode_marker = 'fragment' in tags or self._is_slideshow_fragment(cell)
             fragment_index = self._get_fragment_index(cell)
             has_fragment_index = fragment_index is not None
             
             if is_no_fragment:
-                # Exit fragment mode
-                if current_fragment:
-                    fragments.append({
-                        'cells': current_fragment,
-                        'index': current_fragment_index,
-                        'has_index': current_fragment_index is not None
-                    })
-                    current_fragment = []
-                    current_fragment_index = None
-                in_fragment = False
-                # Add the no-fragment cell itself if it has content
+                # End fragment mode; this cell is treated as normal content (not a fragment)
+                in_fragment_mode = False
+                current_fragment_step = None
                 cell_content = self._get_cell_content(cell).strip()
                 if cell_content:
                     fragments.append({
                         'cells': [cell],
                         'index': None,
-                        'has_index': False
+                        'has_index': False,
+                        'force_fragment': False,
                     })
-            elif is_fragment_marker or has_fragment_index:
-                # Start a new fragment
-                if current_fragment:
-                    # Save the previous fragment
-                    fragments.append({
-                        'cells': current_fragment,
-                        'index': current_fragment_index,
-                        'has_index': current_fragment_index is not None
-                    })
-                # Start new fragment and include this cell if it has content
-                cell_content = self._get_cell_content(cell).strip()
-                if cell_content:
-                    current_fragment = [cell]
+                continue
+            
+            # A cell with 'fragment' or 'fragment-index-N' starts a NEW fragment step.
+            if is_fragment_mode_marker or has_fragment_index:
+                in_fragment_mode = True
+                if has_fragment_index:
+                    current_fragment_step = fragment_index
+                    if fragment_index is not None:
+                        next_auto_fragment_step = max(next_auto_fragment_step, fragment_index + 1)
                 else:
-                    current_fragment = []
-                current_fragment_index = fragment_index
-                in_fragment = True
-            else:
-                if in_fragment:
-                    # Add to current fragment
-                    current_fragment.append(cell)
-                else:
-                    # Not in a fragment, treat as individual fragment without index
-                    fragments.append({
-                        'cells': [cell],
-                        'index': None,
-                        'has_index': False
-                    })
-        
-        # Add the last fragment
-        if current_fragment:
+                    current_fragment_step = next_auto_fragment_step
+                    next_auto_fragment_step += 1
+
+            # While in fragment mode, every cell belongs to the CURRENT fragment step.
+            force_fragment = in_fragment_mode
+            
+            cell_content = self._get_cell_content(cell).strip()
+            if not cell_content:
+                # Skip empty cells within the slide (they are already skipped globally,
+                # but keep this safe for locally constructed cell lists).
+                continue
+            
             fragments.append({
-                'cells': current_fragment,
-                'index': current_fragment_index,
-                'has_index': current_fragment_index is not None
+                'cells': [cell],
+                'index': current_fragment_step if force_fragment else None,
+                'has_index': (current_fragment_step is not None) if force_fragment else False,
+                'force_fragment': force_fragment,
             })
         
+        return fragments, in_fragment_mode, current_fragment_step, next_auto_fragment_step
+
+    def _group_cells_into_fragments(self, cells: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Backwards-compatible wrapper: group cells into fragments starting with fragment mode off."""
+        fragments, _, _, _ = self._group_cells_into_fragments_with_state(
+            cells,
+            in_fragment_mode=False,
+            current_fragment_step=None,
+            next_auto_fragment_step=0,
+        )
         return fragments
     
     def _extract_footnote_markers(self, cells: List[Dict[str, Any]]) -> List[str]:
@@ -555,9 +758,11 @@ class NotebookConverter:
     def _render_inline_markdown_for_raw_html(self, text: str) -> str:
         parts: List[str] = []
         code_spans: List[str] = []
+        math_spans: List[str] = []
 
         i = 0
         while i < len(text):
+            # Protect inline code spans
             if text[i] == '`':
                 j = text.find('`', i + 1)
                 if j != -1:
@@ -565,15 +770,42 @@ class NotebookConverter:
                     parts.append(f"\x00CODE{len(code_spans) - 1}\x00")
                     i = j + 1
                     continue
+            
+            # Protect inline math $...$
+            if text[i] == '$' and (i + 1 < len(text) and text[i + 1] != '$'):
+                j = i + 1
+                while j < len(text):
+                    if text[j] == '$' and (j + 1 >= len(text) or text[j + 1] != '$'):
+                        # Found closing $
+                        math_spans.append(text[i : j + 1])
+                        parts.append(f"\x00MATH{len(math_spans) - 1}\x00")
+                        i = j + 1
+                        break
+                    j += 1
+                else:
+                    # No closing $ found, treat as regular character
+                    parts.append(text[i])
+                    i += 1
+                continue
+            
             parts.append(text[i])
             i += 1
 
         rendered = ''.join(parts)
+        
+        # Convert markdown links [text](url) to HTML <a> tags
+        rendered = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', rendered)
+        
         rendered = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", rendered, flags=re.DOTALL)
         rendered = re.sub(r"__(.+?)__", r"<b>\1</b>", rendered, flags=re.DOTALL)
+        rendered = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", rendered, flags=re.DOTALL)
+        rendered = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<i>\1</i>", rendered, flags=re.DOTALL)
 
         for idx, code in enumerate(code_spans):
             rendered = rendered.replace(f"\x00CODE{idx}\x00", f"<code>{code}</code>")
+        
+        for idx, math in enumerate(math_spans):
+            rendered = rendered.replace(f"\x00MATH{idx}\x00", math)
 
         return rendered
 
@@ -595,8 +827,12 @@ class NotebookConverter:
         def _sub_alert(match: re.Match) -> str:
             start, body, end = match.group(1), match.group(2), match.group(3)
             body = inline_code_pattern.sub(r"<code>\1</code>", body)
+            # Convert markdown links [text](url) to HTML <a> tags
+            body = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', body)
             body = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", body, flags=re.DOTALL)
             body = re.sub(r"__(.+?)__", r"<b>\1</b>", body, flags=re.DOTALL)
+            body = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", body, flags=re.DOTALL)
+            body = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<i>\1</i>", body, flags=re.DOTALL)
             return f"{start}{body}{end}"
 
         return alert_div_pattern.sub(_sub_alert, html)
@@ -624,6 +860,39 @@ class NotebookConverter:
                     br_count = max(br_count, n)
         return br_count
 
+    def _get_space_html(self, tags: List[str]) -> str:
+        """Return an HTML snippet that adds vertical spacing based on tags.
+
+        Supported tags:
+        - space (equivalent to space-16px)
+        - space-N (interpreted as pixels)
+        - space-<value><unit> where unit is px, em, or rem (e.g., space-2em)
+        
+        If multiple space tags are present, the maximum pixel-equivalent wins when
+        comparable. If units differ, the last parsed valid tag wins.
+        """
+        space_value: Optional[str] = None
+        
+        for tag in tags:
+            if tag == 'space':
+                space_value = '16px'
+                continue
+            if not tag.startswith('space-'):
+                continue
+            raw = tag.split('-', 1)[1].strip()
+            if not raw:
+                continue
+            if raw.isdigit():
+                space_value = f"{raw}px"
+                continue
+            if re.fullmatch(r"\d+(?:\.\d+)?(px|em|rem)", raw):
+                space_value = raw
+        
+        if not space_value:
+            return ''
+        
+        return f'\n<div style="height: {space_value};"></div>'
+
     def _get_padding_style(self, tags: List[str]) -> Optional[str]:
         """Return an inline style string for padding tags.
 
@@ -645,6 +914,117 @@ class NotebookConverter:
             return None
 
         return ' '.join(styles)
+
+    def _separate_display_math(self, content: str) -> str:
+        """Ensure display math blocks ($$ ... $$) are separated from surrounding text.
+
+        Some markdown renderers can treat text immediately adjacent to display-math
+        blocks as part of the same paragraph/block, which may cause the text to
+        inherit centering/styling meant for display math.
+        """
+        lines = content.split('\n')
+        out: List[str] = []
+        in_display_math = False
+        skip_following_blank_lines = False
+
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+
+            if skip_following_blank_lines and stripped == '':
+                continue
+            if stripped != '':
+                skip_following_blank_lines = False
+
+            is_delimiter = stripped == '$$'
+
+            if is_delimiter:
+                if not in_display_math:
+                    # Opening $$: ensure exactly one blank line before it if preceded by text.
+                    if out and out[-1].strip() != '':
+                        out.append('')
+                    out.append('$$')
+                    in_display_math = True
+                    continue
+
+                # Closing $$: never allow blank lines right before it (inside the block)
+                while out and out[-1].strip() == '':
+                    out.pop()
+                out.append('$$')
+                in_display_math = False
+
+                # If there's more non-empty content after the block (and it's not another $$),
+                # add exactly one blank line after the closing delimiter.
+                j = idx + 1
+                while j < len(lines) and lines[j].strip() == '':
+                    j += 1
+                if j < len(lines) and lines[j].strip() != '$$':
+                    out.append('')
+                    # Skip any notebook-provided blank lines that follow; we've normalized to one.
+                    skip_following_blank_lines = True
+                continue
+
+            if in_display_math:
+                # Inside $$...$$: drop all blank/whitespace-only lines.
+                if stripped == '':
+                    continue
+                out.append(line)
+                continue
+
+            out.append(line)
+
+        return '\n'.join(out)
+
+    def _escape_math_for_reveal_markdown(self, content: str) -> str:
+        parts = re.split(r'(```[\s\S]*?```)', content)
+        out_parts: List[str] = []
+
+        for part in parts:
+            if part.startswith('```'):
+                out_parts.append(part)
+                continue
+
+            placeholder_spans: List[str] = []
+
+            def _stash_inline_code(m: re.Match) -> str:
+                placeholder_spans.append(m.group(0))
+                return f"@@NB2MD_INLINE_CODE_{len(placeholder_spans) - 1}@@"
+
+            working = re.sub(r'`[^`]*`', _stash_inline_code, part)
+
+            lines = working.split('\n')
+            escaped_lines: List[str] = []
+            in_display_math = False
+            for line in lines:
+                stripped = line.strip()
+                if stripped == '$$':
+                    in_display_math = not in_display_math
+                    escaped_lines.append(line)
+                    continue
+
+                if in_display_math:
+                    # Reveal.js markdown processing requires all backslashes to be doubled
+                    line = line.replace('\\', '\\\\')
+                    # After doubling, line breaks \\ become \\\\, add {} to prevent issues
+                    if line.rstrip().endswith('\\\\'):
+                        line = re.sub(r'\\\\\s*$', r'\\\\{}', line)
+                escaped_lines.append(line)
+
+            working = '\n'.join(escaped_lines)
+
+            def _escape_inline_math(m: re.Match) -> str:
+                inner = m.group(1)
+                # Reveal.js markdown processing requires backslashes to be doubled
+                inner = inner.replace('\\', '\\\\')
+                return f"${inner}$"
+
+            working = re.sub(r'(?<!\$)(?<!\\)\$([^\n$]+?)\$(?!\$)', _escape_inline_math, working)
+
+            for i, original in enumerate(placeholder_spans):
+                working = working.replace(f"@@NB2MD_INLINE_CODE_{i}@@", original)
+
+            out_parts.append(working)
+
+        return ''.join(out_parts)
     
     def _format_cell_content(self, cell: Dict[str, Any]) -> str:
         """
@@ -679,7 +1059,8 @@ class NotebookConverter:
             'warning': ('alert-warning', 'WARNING'),
             'note': ('alert-note', 'NOTE'),
             'hint': ('alert-hint', 'HINT'),
-            'recall': ('alert-recall', 'RECALL')
+            'recall': ('alert-recall', 'RECALL'),
+            'error': ('alert-error', 'ERROR')
         }
         
         alert_type = None
@@ -697,9 +1078,14 @@ class NotebookConverter:
 
         padding_style = self._get_padding_style(tags)
         br_count = self._get_br_count(tags)
+        space_html = self._get_space_html(tags)
         
         if cell_type == 'markdown':
-            content = cell_content.strip()
+            content = self._separate_display_math(cell_content.strip())
+            
+            # Skip math escaping for alert boxes since they render as raw HTML
+            if not alert_type:
+                content = self._escape_math_for_reveal_markdown(content)
 
             # Title/subtitle/date style content: render to template-specific ids
             if title_id:
@@ -709,20 +1095,27 @@ class NotebookConverter:
                 if padding_style:
                     content = f'<div style="{padding_style}">\n\n{content}\n\n</div>'
                 if br_count:
-                    content += "\n" + ("<br/>\n" * br_count)
+                    content += "\n\n" + ("<br/>\n" * br_count)
+                if space_html:
+                    content += space_html
                 return content
 
             # Wrap in alert box if needed
             if alert_type:
                 content = self._render_inline_markdown_for_raw_html(content)
                 content = f'<div class="alert {alert_class}">{content}</div>'
+            elif should_center and padding_style:
+                content = f'<div class="cell-center" style="{padding_style}">\n\n{content}\n\n</div>'
+                padding_style = None
             elif should_center:
                 content = f'<div class="cell-center">\n\n{content}\n\n</div>'
 
             if padding_style:
                 content = f'<div style="{padding_style}">\n\n{content}\n\n</div>'
             if br_count:
-                content += "\n" + ("<br/>\n" * br_count)
+                content += "\n\n" + ("<br/>\n" * br_count)
+            if space_html:
+                content += space_html
             
             return content
         elif cell_type == 'code':
@@ -740,13 +1133,18 @@ class NotebookConverter:
             # Wrap in alert box if needed
             if alert_type:
                 code_block = f'<div class="alert {alert_class}">\n\n{code_block}\n\n</div>'
+            elif should_center and padding_style:
+                code_block = f'<div class="cell-center" style="{padding_style}">\n\n{code_block}\n\n</div>'
+                padding_style = None
             elif should_center:
                 code_block = f'<div class="cell-center">\n\n{code_block}\n\n</div>'
 
             if padding_style:
                 code_block = f'<div style="{padding_style}">\n\n{code_block}\n\n</div>'
             if br_count:
-                code_block += "\n" + ("<br/>\n" * br_count)
+                code_block += "\n\n" + ("<br/>\n" * br_count)
+            if space_html:
+                code_block += space_html
             
             return code_block
         
@@ -832,8 +1230,16 @@ class NotebookConverter:
                     # Skip the first cell entirely
                     cells_to_process = regular_cells[1:]
         
-        # Check if any cell has 'col', 'column', 'top-col', 'top-column', or 'no-column' tag
-        has_columns = any('col' in self._get_cell_tags(cell) or 'column' in self._get_cell_tags(cell) or 'top-col' in self._get_cell_tags(cell) or 'top-column' in self._get_cell_tags(cell) or 'no-column' in self._get_cell_tags(cell) for cell in cells_to_process)
+        # Check if any cell has column tags
+        has_columns = any(
+            'col' in self._get_cell_tags(cell)
+            or 'column' in self._get_cell_tags(cell)
+            or 'top-col' in self._get_cell_tags(cell)
+            or 'top-column' in self._get_cell_tags(cell)
+            or 'no-column' in self._get_cell_tags(cell)
+            or 'end-column' in self._get_cell_tags(cell)
+            for cell in cells_to_process
+        )
         
         # Build the slide
         result = slide_state
@@ -849,79 +1255,216 @@ class NotebookConverter:
         
         if cells_to_process:
             result += "<div class=\"content-center\">\n\n"
+
+            open_fragment_index: Optional[int] = None
+
+            def _close_open_fragment() -> None:
+                nonlocal result, open_fragment_index
+                if open_fragment_index is not None:
+                    result += "</div>\n\n"
+                    open_fragment_index = None
+
+            def _emit_cell_content(content: str, fragment_index: Optional[int]) -> None:
+                nonlocal result, open_fragment_index
+                if fragment_index is None:
+                    _close_open_fragment()
+                    result += content + "\n\n"
+                    return
+
+                if open_fragment_index != fragment_index:
+                    _close_open_fragment()
+                    open_fragment_index = fragment_index
+                    result += f"<div class=\"fragment\" data-fragment-index=\"{fragment_index}\">\n\n"
+
+                result += content + "\n\n"
             
             if has_columns:
-                # Group cells into pre-column cells, columns, and post-column cells
-                pre_column_cells, columns, post_column_cells, alignment = self._group_cells_into_columns(cells_to_process)
-                
-                # Process pre-column cells first (not wrapped in col div)
-                if pre_column_cells:
-                    pre_column_parts = []
-                    for cell in pre_column_cells:
-                        content = self._format_cell_content(cell)
-                        if content:
-                            pre_column_parts.append(content)
-                    
-                    if pre_column_parts:
-                        result += "\n\n".join(pre_column_parts) + "\n\n"
-                
-                # Wrap columns in a container div to prevent flex layout issues
-                if columns:
+                in_fragment_mode = False
+                current_fragment_step: Optional[int] = None
+                next_auto_fragment_step = 0
+
+                def _render_columns_block(columns: List[List[Dict[str, Any]]], alignment: str, use_table: bool = False) -> None:
+                    nonlocal in_fragment_mode, current_fragment_step, next_auto_fragment_step
+                    if not columns:
+                        return
+
+                    # If use_table is True, render as HTML table for row alignment
+                    if use_table:
+                        table_html = self._render_table_columns(columns, alignment)
+                        columns_fragment_index: Optional[int] = current_fragment_step if in_fragment_mode else None
+                        _emit_cell_content(table_html, columns_fragment_index)
+                        return
+
                     align_class = "columns-top" if alignment == 'top' else "columns-center"
-                    result += f"<div class=\"columns-container {align_class}\">\n\n"
-                    
-                    # Process columns
-                    for column_cells in columns:
-                        result += "<div class=\"col\">\n\n"
-                        
-                        # Group column cells into fragments
-                        fragment_groups = self._group_cells_into_fragments(column_cells)
-                        
+
+                    def _column_has_fragment_marker(col_cells: List[Dict[str, Any]]) -> bool:
+                        for c in col_cells:
+                            tags = self._get_cell_tags(c)
+                            if 'fragment' in tags or self._is_slideshow_fragment(c) or self._get_fragment_index(c) is not None:
+                                return True
+                        return False
+
+                    first_col_has_marker = _column_has_fragment_marker(columns[0]) if columns else False
+                    other_cols_have_marker = any(_column_has_fragment_marker(col_cells) for col_cells in columns[1:])
+                    any_col_has_marker = first_col_has_marker or other_cols_have_marker
+
+                    # Rule:
+                    # 1) If ONLY the first column has a fragment marker, the whole columns block
+                    #    (and following content via fragment mode) must appear together.
+                    # 2) If a fragment marker appears in any other column OR in all columns,
+                    #    columns should appear at different times.
+                    group_whole_columns = first_col_has_marker and not other_cols_have_marker
+
+                    if not any_col_has_marker:
+                        columns_parts: List[str] = []
+                        columns_parts.append(f"<div class=\"columns-container {align_class}\">\n\n")
+                        for col_cells in columns:
+                            columns_parts.append("<div class=\"col\">\n\n")
+                            for cell in col_cells:
+                                content = self._format_cell_content(cell)
+                                if content:
+                                    columns_parts.append(content + "\n\n")
+                            columns_parts.append("</div>\n\n")
+                        columns_parts.append("</div>")
+                        columns_html = ''.join(columns_parts).rstrip()
+
+                        columns_fragment_index: Optional[int] = current_fragment_step if in_fragment_mode else None
+                        _emit_cell_content(columns_html, columns_fragment_index)
+                    elif group_whole_columns:
+                        flattened_column_cells: List[Dict[str, Any]] = []
+                        for col_cells in columns:
+                            flattened_column_cells.extend(col_cells)
+
+                        columns_fragment_groups, in_fragment_mode, current_fragment_step, next_auto_fragment_step = self._group_cells_into_fragments_with_state(
+                            flattened_column_cells,
+                            in_fragment_mode=in_fragment_mode,
+                            current_fragment_step=current_fragment_step,
+                            next_auto_fragment_step=next_auto_fragment_step,
+                        )
+
+                        columns_fragment_index: Optional[int] = None
+                        for info in columns_fragment_groups:
+                            if info.get('index') is not None:
+                                columns_fragment_index = info.get('index')
+                                break
+
+                        columns_parts: List[str] = []
+                        columns_parts.append(f"<div class=\"columns-container {align_class}\">\n\n")
+                        for col_cells in columns:
+                            columns_parts.append("<div class=\"col\">\n\n")
+                            for cell in col_cells:
+                                content = self._format_cell_content(cell)
+                                if content:
+                                    columns_parts.append(content + "\n\n")
+                            columns_parts.append("</div>\n\n")
+                        columns_parts.append("</div>")
+                        columns_html = ''.join(columns_parts).rstrip()
+
+                        _emit_cell_content(columns_html, columns_fragment_index)
+                    else:
+                        columns_parts: List[str] = []
+                        columns_parts.append(f"<div class=\"columns-container {align_class}\">\n\n")
+
+                        for col_idx, col_cells in enumerate(columns):
+                            has_marker = _column_has_fragment_marker(col_cells)
+
+                            columns_parts.append("<div class=\"col\">\n\n")
+
+                            # Group cells within this column by their fragment-index
+                            cell_groups: List[Tuple[Optional[int], List[Dict[str, Any]]]] = []
+                            current_group_index: Optional[int] = None
+                            current_group_cells: List[Dict[str, Any]] = []
+
+                            for cell in col_cells:
+                                cell_fragment_index = self._get_fragment_index(cell)
+                                cell_tags = self._get_cell_tags(cell)
+                                is_fragment_marker = 'fragment' in cell_tags or self._is_slideshow_fragment(cell)
+                                
+                                # Determine the fragment index for this cell
+                                if cell_fragment_index is not None:
+                                    # Cell has explicit fragment-index-N
+                                    if current_group_index != cell_fragment_index:
+                                        # Start a new group
+                                        if current_group_cells:
+                                            cell_groups.append((current_group_index, current_group_cells))
+                                        current_group_index = cell_fragment_index
+                                        current_group_cells = [cell]
+                                        next_auto_fragment_step = max(next_auto_fragment_step, cell_fragment_index + 1)
+                                    else:
+                                        # Continue current group
+                                        current_group_cells.append(cell)
+                                elif is_fragment_marker:
+                                    # Cell has 'fragment' tag but no explicit index
+                                    new_index = next_auto_fragment_step
+                                    if current_group_index != new_index:
+                                        if current_group_cells:
+                                            cell_groups.append((current_group_index, current_group_cells))
+                                        current_group_index = new_index
+                                        current_group_cells = [cell]
+                                        next_auto_fragment_step += 1
+                                    else:
+                                        current_group_cells.append(cell)
+                                else:
+                                    # Cell has no fragment marker
+                                    if current_group_index is not None:
+                                        # End current fragment group
+                                        if current_group_cells:
+                                            cell_groups.append((current_group_index, current_group_cells))
+                                        current_group_index = None
+                                        current_group_cells = [cell]
+                                    else:
+                                        # Continue non-fragment group
+                                        current_group_cells.append(cell)
+
+                            # Add the last group
+                            if current_group_cells:
+                                cell_groups.append((current_group_index, current_group_cells))
+
+                            # Render each group
+                            for group_fragment_index, group_cells in cell_groups:
+                                if group_fragment_index is not None:
+                                    # Wrap in fragment div
+                                    columns_parts.append(f"<div class=\"fragment\" data-fragment-index=\"{group_fragment_index}\">\n\n")
+                                
+                                for cell in group_cells:
+                                    content = self._format_cell_content(cell)
+                                    if content:
+                                        columns_parts.append(content + "\n\n")
+                                
+                                if group_fragment_index is not None:
+                                    columns_parts.append("</div>\n\n")
+
+                            columns_parts.append("</div>\n\n")
+
+                        columns_parts.append("</div>")
+                        columns_html = ''.join(columns_parts).rstrip()
+
+                        _emit_cell_content(columns_html, None)
+
+                segments = self._split_cells_into_column_blocks(cells_to_process)
+
+                for seg in segments:
+                    if seg.get('type') == 'cells':
+                        seg_cells = seg.get('cells', [])
+                        if not seg_cells:
+                            continue
+
+                        fragment_groups, in_fragment_mode, current_fragment_step, next_auto_fragment_step = self._group_cells_into_fragments_with_state(
+                            seg_cells,
+                            in_fragment_mode=in_fragment_mode,
+                            current_fragment_step=current_fragment_step,
+                            next_auto_fragment_step=next_auto_fragment_step,
+                        )
+
                         for fragment_info in fragment_groups:
                             fragment_cells = fragment_info['cells']
                             fragment_index = fragment_info['index']
-                            has_index = fragment_info['has_index']
-                            
-                            # Check if this is a multi-cell fragment or has explicit fragment marking
-                            is_multi_cell_fragment = len(fragment_cells) > 1 or (
-                                len(fragment_cells) == 1 and 
-                                ('fragment' in self._get_cell_tags(fragment_cells[0]) or 
-                                 self._is_slideshow_fragment(fragment_cells[0]) or
-                                 has_index)
-                            )
-                            
-                            # Process cells in this fragment
-                            fragment_parts = []
                             for cell in fragment_cells:
                                 content = self._format_cell_content(cell)
                                 if content:
-                                    fragment_parts.append(content)
-                            
-                            if fragment_parts:
-                                fragment_content = "\n\n".join(fragment_parts)
-                                # Wrap in fragment div if this is a multi-cell fragment
-                                if is_multi_cell_fragment:
-                                    if has_index:
-                                        result += f"<div class=\"fragment\" data-fragment-index=\"{fragment_index}\">\n\n{fragment_content}\n\n</div>\n\n"
-                                    else:
-                                        result += f"<div class=\"fragment\">\n\n{fragment_content}\n\n</div>\n\n"
-                                else:
-                                    result += fragment_content + "\n\n"
-                        
-                        result += "</div>\n\n"
-                    
-                    result += "</div>\n\n"
-                
-                # Process post-column cells (after no-column tag)
-                if post_column_cells:
-                    post_column_parts = []
-                    for cell in post_column_cells:
-                        content = self._format_cell_content(cell)
-                        if content:
-                            post_column_parts.append(content)
-                    
-                    if post_column_parts:
-                        result += "\n\n".join(post_column_parts)
+                                    _emit_cell_content(content, fragment_index)
+                    elif seg.get('type') == 'columns':
+                        _render_columns_block(seg.get('columns', []), seg.get('alignment', 'center'), seg.get('use_table', False))
             else:
                 # No columns, group cells into fragments
                 fragment_groups = self._group_cells_into_fragments(cells_to_process)
@@ -929,33 +1472,12 @@ class NotebookConverter:
                 for fragment_info in fragment_groups:
                     fragment_cells = fragment_info['cells']
                     fragment_index = fragment_info['index']
-                    has_index = fragment_info['has_index']
-                    
-                    # Check if this is a multi-cell fragment or has explicit fragment marking
-                    is_multi_cell_fragment = len(fragment_cells) > 1 or (
-                        len(fragment_cells) == 1 and 
-                        ('fragment' in self._get_cell_tags(fragment_cells[0]) or 
-                         self._is_slideshow_fragment(fragment_cells[0]) or
-                         has_index)
-                    )
-                    
-                    # Process cells in this fragment
-                    fragment_parts = []
                     for cell in fragment_cells:
                         content = self._format_cell_content(cell)
                         if content:
-                            fragment_parts.append(content)
-                    
-                    if fragment_parts:
-                        fragment_content = "\n\n".join(fragment_parts)
-                        # Wrap in fragment div if this is a multi-cell fragment
-                        if is_multi_cell_fragment:
-                            if has_index:
-                                result += f"<div class=\"fragment\" data-fragment-index=\"{fragment_index}\">\n\n{fragment_content}\n\n</div>\n\n"
-                            else:
-                                result += f"<div class=\"fragment\">\n\n{fragment_content}\n\n</div>\n\n"
-                        else:
-                            result += fragment_content + "\n\n"
+                            _emit_cell_content(content, fragment_index)
+
+            _close_open_fragment()
             
             result += "\n\n</div>"
         

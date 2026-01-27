@@ -208,6 +208,52 @@ Use the `col` tag to create multi-column layouts within a slide:
    </div>
    ```
 
+### Row-Aligned Columns with `table-row`
+
+Use the `table-row` tag to create columns where content aligns horizontally as rows:
+
+1. **How it works**:
+   - Tag cells with both `col` and `table-row` to enable row alignment
+   - Each cell in a column becomes a row in an HTML table
+   - Rows align perfectly across columns regardless of content height
+   - The table is transparent (no borders) and behaves like a layout grid
+
+2. **Example** (RSA Scheme slide):
+   ```
+   Cell 1: ## RSA Scheme (markdown, no tag)
+   Cell 2: What we would like to have in principle: (markdown, no tag)
+   
+   Cell 3 (tag: col, table-row):
+   - message:$~$
+   - public key:$~$
+   - private key:$~$
+   - scheme:$~$
+   - work with modular arithmetic
+   
+   Cell 4 (tag: col, table-row):
+   $x$
+   $e$
+   $d$
+   $y = x^e~~~$ such that $~~~y^d = y^{ed} = x$
+   
+   Cell 5 (tag: end-column):
+   ***How to achieve this?***
+   ```
+   
+   This generates an HTML table where each line in the left column aligns with the corresponding line in the right column:
+   ```
+   message:              $x$
+   public key:           $e$
+   private key:          $d$
+   scheme:               $y = x^e...$
+   work with...          (empty)
+   ```
+
+3. **When to use**:
+   - Use `table-row` when you need precise row alignment between columns
+   - Use regular `col` when you want flexible column heights
+   - Combine with `top-col` for top-aligned table rows
+
 ## Centering Content
 
 Use the `center` tag to horizontally center content within a cell:
