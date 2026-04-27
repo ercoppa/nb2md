@@ -1007,6 +1007,10 @@ class NotebookConverter:
                     # After doubling, line breaks \\ become \\\\, add {} to prevent issues
                     if line.rstrip().endswith('\\\\'):
                         line = re.sub(r'\\\\\s*$', r'\\\\{}', line)
+                    # Escape unescaped underscores/asterisks so marked doesn't treat
+                    # them as emphasis delimiters before KaTeX processes subscripts.
+                    line = re.sub(r'(?<!\\)_', r'\\_', line)
+                    line = re.sub(r'(?<!\\)\*', r'\\*', line)
                 escaped_lines.append(line)
 
             working = '\n'.join(escaped_lines)
@@ -1015,6 +1019,10 @@ class NotebookConverter:
                 inner = m.group(1)
                 # Reveal.js markdown processing requires backslashes to be doubled
                 inner = inner.replace('\\', '\\\\')
+                # Escape unescaped underscores/asterisks so marked doesn't treat
+                # them as emphasis delimiters before KaTeX processes subscripts.
+                inner = re.sub(r'(?<!\\)_', r'\\_', inner)
+                inner = re.sub(r'(?<!\\)\*', r'\\*', inner)
                 return f"${inner}$"
 
             working = re.sub(r'(?<!\$)(?<!\\)\$([^\n$]+?)\$(?!\$)', _escape_inline_math, working)
